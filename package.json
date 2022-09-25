@@ -1,0 +1,20 @@
+{
+  "name": "js-srp",
+  "version": "0.0.1",
+  "description": "A TypeScript implementation of SRP-6a with some tweaks, designed to be compatible with opencoff/go-srp.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc"
+  },
+  "type": "module",
+  "author": "John Chadwick",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jchv/js-srp.git"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "typescript": "^4"
+  }
+}
