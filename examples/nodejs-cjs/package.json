@@ -1,0 +1,14 @@
+{
+  "name": "js-srp-nodejs-cjs-example",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node index.js && tsc"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "js-srp": "file:../.."
+  }
+}

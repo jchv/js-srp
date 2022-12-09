@@ -1,13 +1,28 @@
 {
   "name": "js-srp",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A TypeScript implementation of SRP-6a with some tweaks, designed to be compatible with opencoff/go-srp.",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc"
+  "main": "dist/index.node.cjs",
+  "browser": "dist/index.browser.js",
+  "module": "dist/index.node.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": "./dist/index.browser.js",
+      "require": "./dist/index.node.cjs",
+      "default": "./dist/index.node.mjs"
+    }
   },
-  "type": "module",
+  "scripts": {
+    "test": "npm run build:test && node ./dist/test.js",
+    "check": "tsc --noEmit",
+    "build": "npm run build:browser && npm run build:node:cjs && npm run build:node:esm && npm run build:types",
+    "build:browser": "esbuild --minify --bundle --platform=browser --inject:src/webcrypto.browser.ts --format=esm --outfile=dist/index.browser.js src/index.ts",
+    "build:node:cjs": "esbuild --minify --bundle --platform=node --inject:src/webcrypto.nodejs.cjs.ts --format=cjs --outfile=dist/index.node.cjs src/index.ts",
+    "build:node:esm": "esbuild --minify --bundle --platform=node --inject:src/webcrypto.nodejs.esm.ts --format=esm --outfile=dist/index.node.mjs src/index.ts",
+    "build:test": "esbuild --bundle --platform=node --inject:src/webcrypto.nodejs.esm.ts --format=esm --outfile=dist/test.js src/test.ts",
+    "build:types": "tsc --declaration --emitDeclarationOnly"
+  },
   "author": "John Chadwick",
   "repository": {
     "type": "git",
@@ -15,6 +30,9 @@
   },
   "license": "ISC",
   "devDependencies": {
+    "@types/node": "^18.7.23",
+    "esbuild": "^0.16.3",
     "typescript": "^4"
-  }
+  },
+  "type": "module"
 }

@@ -1,0 +1,14 @@
+{
+  "name": "js-srp-browser-esbuild-example",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "esbuild --minify --bundle --platform=browser --outfile=dist/index.js index.js && tsc"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "js-srp": "file:../.."
+  }
+}

@@ -1,13 +1,5 @@
 /**
- * A simple SRP-6a implementation with some tweaks.
- *
- * In addition to SRP-6a:
- * - The identity I is hashed prior to calculating the verifier.
- * - The passphrase p is hashed prior to calculating the verifier.
- * - The hash function is configurable, but only supports WebCrypto-compatible algorithms.
- * 
- * This library is designed to be compatible with
- * https://github.com/opencoff/go-srp.
+ * A simple SRP-6a implementation.
  * 
  * --
  * 
@@ -28,14 +20,20 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-// This should give us the WebCrypto API in both browsers and Node.js.
-let webcrypto: Crypto;
-if (typeof self === 'undefined') {
-  // @ts-ignore - prefer to not include node types only for this
-  webcrypto = require('node:crypto').webcrypto as Crypto;
-} else {
-  webcrypto = self.crypto;
-}
+import {
+  bigintFromBytes,
+  bytesFromBigint,
+  concatBytes,
+  constantTimeCompare,
+  fromHex,
+  hash,
+  Hash,
+  hashInterleave,
+  modPow,
+  randomBytes,
+  toHex,
+  xorBytes,
+} from "./util.js";
 
 /**
  * Prime fields used for cryptographic operations.
@@ -47,14 +45,12 @@ if (typeof self === 'undefined') {
 }
 
 /**
- * Enumeration of hash types. This is a subset of the Go hash enumeration, with
- * only algorithms supported by WebCrypto.
+ * Enumeration of different compatibility modes.
  */
-export enum Hash {
-  SHA1 = 3,
-  SHA256 = 5,
-  SHA384 = 6,
-  SHA512 = 7,
+export enum Mode {
+  RFC2945 = 0, /** Implements the hash interleave. */
+  SRPTools = 1,
+  GoSRP = 2,
 }
 
 /** Known-safe prime fields. */
@@ -67,260 +63,6 @@ const knownPrimeFields = new Map<number, PrimeField>([
   [6144, { g: 5n, N: 0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e208e24fa074e5ab3143db5bfce0fd108e4b82d120a92108011a723c12a787e6d788719a10bdba5b2699c327186af4e23c1a946834b6150bda2583e9ca2ad44ce8dbbbc2db04de8ef92e8efc141fbecaa6287c59474e6bc05d99b2964fa090c3a2233ba186515be7ed1f612970cee2d7afb81bdd762170481cd0069127d5b05aa993b4ea988d8fddc186ffb7dc90a6c08f4df435c93402849236c3fab4d27c7026c1d4dcb2602646dec9751e763dba37bdf8ff9406ad9e530ee5db382f413001aeb06a53ed9027d831179727b0865a8918da3edbebcf9b14ed44ce6cbaced4bb1bdb7f1447e6cc254b332051512bd7af426fb8f401378cd2bf5983ca01c64b92ecf032ea15d1721d03f482d7ce6e74fef6d55e702f46980c82b5a84031900b1c9e59e7c97fbec7e8f323a97a7e36cc88be0f1d45b7ff585ac54bd407b22b4154aacc8f6d7ebf48e1d814cc5ed20f8037e0a79715eef29be32806a1d58bb7c5da76f550aa3d8a1fbff0eb19ccb1a313d55cda56c9ec2ef29632387fe8d76e3c0468043e8f663f4860ee12bf2d5b0b7474d6e694f91e6dcc4024ffffffffffffffffn, n: 768 }],
   [8192, { g: 19n, N: 0xffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f14374fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7edee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf0598da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3be39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf6955817183995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e208e24fa074e5ab3143db5bfce0fd108e4b82d120a92108011a723c12a787e6d788719a10bdba5b2699c327186af4e23c1a946834b6150bda2583e9ca2ad44ce8dbbbc2db04de8ef92e8efc141fbecaa6287c59474e6bc05d99b2964fa090c3a2233ba186515be7ed1f612970cee2d7afb81bdd762170481cd0069127d5b05aa993b4ea988d8fddc186ffb7dc90a6c08f4df435c93402849236c3fab4d27c7026c1d4dcb2602646dec9751e763dba37bdf8ff9406ad9e530ee5db382f413001aeb06a53ed9027d831179727b0865a8918da3edbebcf9b14ed44ce6cbaced4bb1bdb7f1447e6cc254b332051512bd7af426fb8f401378cd2bf5983ca01c64b92ecf032ea15d1721d03f482d7ce6e74fef6d55e702f46980c82b5a84031900b1c9e59e7c97fbec7e8f323a97a7e36cc88be0f1d45b7ff585ac54bd407b22b4154aacc8f6d7ebf48e1d814cc5ed20f8037e0a79715eef29be32806a1d58bb7c5da76f550aa3d8a1fbff0eb19ccb1a313d55cda56c9ec2ef29632387fe8d76e3c0468043e8f663f4860ee12bf2d5b0b7474d6e694f91e6dbe115974a3926f12fee5e438777cb6a932df8cd8bec4d073b931ba3bc832b68d9dd300741fa7bf8afc47ed2576f6936ba424663aab639c5ae4f5683423b4742bf1c978238f16cbe39d652de3fdb8befc848ad922222e04a4037c0713eb57a81a23f0c73473fc646cea306b4bcbc8862f8385ddfa9d4b7fa2c087e879683303ed5bdd3a062b3cf5b3a278a66d2a13f83f44f82ddf310ee074ab6a364597e899a0255dc164f31cc50846851df9ab48195ded7ea1b1d510bd7ee74d73faf36bc31ecfa268359046f4eb879f924009438b481c6cd7889a002ed5ee382bc9190da6fc026e479558e4475677e9aa9e3050e2765694dfc81f56e880b96e7160c980dd98edd3dfffffffffffffffffn, n: 1024 }],
 ]);
-
-/**
- * Returns the length of the bigint in bits.
- *
- * @param {bigint} n bigint to check
- * @return {number} count of bits needed to store bigint
- */
-function bitLength(n: bigint): number {
-  return n.toString(2).length;
-}
-
-/**
- * Returns the length of the bigint in bytes. Rounds up to the nearest byte.
- *
- * @param {bigint} n bigint to check
- * @return {number} count of bytes needed to store bigint
- */
-function byteLength(n: bigint): number {
-  return ((bitLength(n) + 7) / 8) | 0;
-}
-
-/**
- * Deserializes a buffer of bytes into a bigint.
- *
- * @param {Uint8Array} buf buffer containing a serialized bigint
- * @return {bigint} deserialized value parsed from buf
- */
-function bigintFromBytes(buf: Uint8Array): bigint {
-  let ret = 0n;
-  for (const i of buf.values()) {
-    ret = (ret << 8n) + BigInt(i);
-  }
-  return ret;
-}
-
-/**
- * Serializes a bigint into a buffer of bytes.
- *
- * @param {bigint} v value to serialize
- * @return {Uint8Array} serialized form of v
- */
-function bytesFromBigint(v: bigint): Uint8Array {
-  const bytes = new Uint8Array(byteLength(v));
-  for (let i = bytes.length - 1; v > 0; i--, v >>= 8n) {
-    bytes[i] = Number(v & 0xffn);
-  }
-  return bytes;
-}
-
-/**
- * Returns cryptographically-safe random bytes into a buffer.
- *
- * @param {number} numBytes number of bytes
- * @return {Uint8Array} buffer containing random bytes
- */
- function randomBytes(numBytes: number): Uint8Array {
-  if (numBytes < 1) {
-    throw new RangeError("numBytes must be >= 1");
-  }
-
-  const bytes = new Uint8Array(numBytes);
-  webcrypto.getRandomValues(bytes);
-  return bytes;
-}
-
-/**
- * Returns the smallest positive value in the multiplicative group of integers
- * modulo n that is congruent to a.
- *
- * @param {bigint} a value to find congruent value of
- * @param {bigint} n modulo of multiplicative group
- * @return {bigint} smallest positive congruent value of a in integers modulo n
- */
-function toZn(a: bigint, n: bigint): bigint {
-  if (n < 1n) {
-    throw new RangeError("n must be > 0");
-  }
-
-  const aZn = a % n;
-  return aZn < 0n ? aZn + n : aZn;
-}
-
-/**
- * Solves for values g, x, y, such that g = gcd(a, b) and g = ax + by.
- *
- * @param {bigint} a
- * @param {bigint} b
- * @return {{g: bigint, x: bigint, y: bigint }}
- */
-function eGcd(
-  a: bigint,
-  b: bigint
-): {
-  g: bigint;
-  x: bigint;
-  y: bigint;
-} {
-  if (a < 1n || b < 1n) {
-    throw new RangeError("a and b must be > 0");
-  }
-
-  let x = 0n;
-  let y = 1n;
-  let u = 1n;
-  let v = 0n;
-
-  while (a !== 0n) {
-    const q = b / a;
-    const r = b % a;
-    const m = x - u * q;
-    const n = y - v * q;
-    b = a;
-    a = r;
-    x = u;
-    y = v;
-    u = m;
-    v = n;
-  }
-
-  return { g: b, x, y };
-}
-
-/**
- * Calculates the modular inverse of a in the multiplicative group of integers
- * modulo n.
- *
- * @param {bigint} a
- * @param {bigint} n
- * @return {bigint}
- */
-function modInv(a: bigint, n: bigint): bigint {
-  const egcd = eGcd(toZn(a, n), n);
-  if (egcd.g !== 1n) {
-    throw new RangeError();
-  } else {
-    return toZn(egcd.x, n);
-  }
-}
-
-/**
- * Calculates the value of x ^ y % m efficiently.
- *
- * @param {bigint} x
- * @param {bigint} y
- * @param {bigint} m
- * @return {bigint}
- */
-function modPow(x: bigint, y: bigint, m: bigint): bigint {
-  if (m < 1n) {
-    throw new RangeError("n must be > 0");
-  } else if (m === 1n) {
-    return 0n;
-  }
-
-  x = toZn(x, m);
-
-  if (y < 0n) {
-    return modInv(modPow(x, y >= 0 ? y : -y, m), m);
-  }
-
-  let r = 1n;
-  while (y > 0) {
-    if (y % 2n === 1n) {
-      r = (r * x) % m;
-    }
-    y = y / 2n;
-    x = x ** 2n % m;
-  }
-  return r;
-}
-
-/**
- * Concatenates multiple buffers into one new buffer.
- *
- * @param {Uint8Array[]} a buffers to concatenate
- * @return {Uint8Array} a new buffer containing the concatenated contents
- */
-function concatBytes(...a: Uint8Array[]): Uint8Array {
-  let length = 0;
-  for (const b of a) {
-    length += b.byteLength;
-  }
-  const buf = new Uint8Array(length);
-  let offset = 0;
-  for (const b of a) {
-    buf.set(b, offset);
-    offset += b.byteLength;
-  }
-  return buf;
-}
-
-/**
- * Encodes a buffer into a hexadecimal string.
- *
- * @param {Uint8Array} buffer buffer to encode
- * @return {string} hex-encoded form of buffer
- */
-function toHex(buffer: Uint8Array): string {
-  return [...buffer].map((x) => x.toString(16).padStart(2, "0")).join("");
-}
-
-/**
- * Decodes a hexadecimal string into a new buffer.
- *
- * @param {string} str hexadecimal string to decode
- * @return {Uint8Array} buffer of bytes decoded from str
- */
-function fromHex(str: string): Uint8Array {
-  return Uint8Array.from(
-    str.match(/.{2}/g)?.map((byte) => parseInt(byte, 16)) ?? []
-  );
-}
-
-/**
- * Compares two buffers with constant-time execution.
- *
- * @param {Uint8Array} a first buffer to compare
- * @param {Uint8Array} b second buffer to compare
- * @return {boolean} true if a == b, otherwise false
- */
-function constantTimeCompare(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-
-  const len = a.length;
-  let out = 0;
-
-  for (let i = 0; i < len; i++) {
-    out |= a[i]! ^ b[i]!;
-  }
-
-  return out === 0;
-}
-
-/**
- * Returns the result of applying a hash to the given buffer.
- *
- * @param {Hash} hash algorithm to use
- * @param {BufferSource} data data to hash
- * @return {Promise<ArrayBuffer>} digest
- */
-function hash(hash: Hash, data: BufferSource): Promise<ArrayBuffer> {
-  switch (hash) {
-    case Hash.SHA1:
-      return webcrypto.subtle.digest("SHA-1", data);
-    case Hash.SHA256:
-      return webcrypto.subtle.digest("SHA-256", data);
-    case Hash.SHA384:
-      return webcrypto.subtle.digest("SHA-384", data);
-    case Hash.SHA512:
-      return webcrypto.subtle.digest("SHA-512", data);
-  }
-}
 
 /**
  * Find a known-safe prime field for a given number of bits.
@@ -367,7 +109,7 @@ function pad(x: bigint, n: number): Uint8Array {
 export class Srp {
   readonly pf: PrimeField;
 
-  constructor(readonly h: Hash, bits: number = 0) {
+  constructor(readonly m: Mode, readonly h: Hash, bits: number = 0) {
     this.pf = findPrimeField(bits);
   }
 
@@ -391,17 +133,25 @@ export class Srp {
     p: Uint8Array,
     salt?: Uint8Array
   ): Promise<Verifier> {
-    const ih = new Uint8Array(await hash(this.h, I));
-    const ph = new Uint8Array(await hash(this.h, p));
+    const ih = this.m === Mode.GoSRP ? new Uint8Array(await hash(this.h, I)) : I;
+    const ph = this.m === Mode.GoSRP ? new Uint8Array(await hash(this.h, p)) : p;
     const pf = this.pf;
     if (!salt) salt = randomBytes(pf.n);
-    const x = await this.hashInt(concatBytes(ih, ph, salt));
-    const r = modPow(pf.g, x, pf.N);
+    const x = this.m === Mode.GoSRP ?
+      await this.hashInt(concatBytes(ih, ph, salt)) :
+      await this.hashInt(
+        concatBytes(salt, new Uint8Array(
+          await hash(this.h,
+            concatBytes(ih, new Uint8Array([0x3A]), ph)
+          )
+        ))
+      );
+    const v = modPow(pf.g, x, pf.N);
 
     return new Verifier({
       i: ih,
       s: salt,
-      v: bytesFromBigint(r),
+      v: bytesFromBigint(v),
       h: this.h,
       pf: pf,
     });
@@ -424,15 +174,13 @@ export class Srp {
 
     return new Client({
       s: this,
-      i: new Uint8Array(await hash(this.h, I)),
-      p: new Uint8Array(await hash(this.h, p)),
+      i: this.m === Mode.GoSRP ? new Uint8Array(await hash(this.h, I)): I,
+      p: this.m === Mode.GoSRP ? new Uint8Array(await hash(this.h, p)): p,
       a,
-      xA: modPow(pf.g, a, pf.N),
+      A: modPow(pf.g, a, pf.N),
       k: await this.hashInt(
         concatBytes(bytesFromBigint(pf.N), pad(pf.g, Number(pf.n)))
       ),
-      xK: new Uint8Array(),
-      xM: new Uint8Array(),
     });
   }
 }
@@ -441,11 +189,11 @@ export class Srp {
  * Contains SRP verifier parameters.
  */
 export class Verifier {
-  private readonly i: Uint8Array;
-  private readonly s: Uint8Array;
-  private readonly v: Uint8Array;
-  private readonly h: Hash;
-  private readonly pf: PrimeField;
+  readonly i: Uint8Array;
+  readonly s: Uint8Array;
+  readonly v: Uint8Array;
+  readonly h: Hash;
+  readonly pf: PrimeField;
 
   constructor(fields: {
     i: Uint8Array;
@@ -485,33 +233,34 @@ export class Verifier {
  * Performs SRP client operations.
  */
 export class Client {
-  private readonly s: Srp;
-  private readonly i: Uint8Array;
-  private readonly p: Uint8Array;
-  private readonly a: bigint;
-  private readonly xA: bigint;
-  private readonly k: bigint;
-  private xK: Uint8Array;
-  private xM: Uint8Array;
+  readonly s: Srp;
+  readonly i: Uint8Array;
+  readonly p: Uint8Array;
+  readonly a: bigint;
+  readonly A: bigint;
+  readonly k: bigint;
+  private _K: Uint8Array;
+  private _M: Uint8Array;
+
+  get K() { return this._K; }
+  get M() { return this._M; }
 
   constructor(fields: {
     s: Srp;
     i: Uint8Array;
     p: Uint8Array;
     a: bigint;
-    xA: bigint;
+    A: bigint;
     k: bigint;
-    xK: Uint8Array;
-    xM: Uint8Array;
   }) {
     this.s = fields.s;
     this.i = fields.i;
     this.p = fields.p;
     this.a = fields.a;
-    this.xA = fields.xA;
+    this.A = fields.A;
     this.k = fields.k;
-    this.xK = fields.xK;
-    this.xM = fields.xM;
+    this._K = new Uint8Array();
+    this._M = new Uint8Array();
   }
 
   /**
@@ -520,61 +269,104 @@ export class Client {
    * @returns {string} serialized credentials
    */
   credentials(): string {
-    return [toHex(this.i), toHex(bytesFromBigint(this.xA))].join(":");
+    return [toHex(this.i), toHex(bytesFromBigint(this.A))].join(":");
   }
 
   /**
-   * Generates an authenticator, given server credentials.
+   * Parses serialized go-srp-style server credentials.
    *
    * @param {string} srv server credentials
-   * @return {Promise<string>} authenticator to send to server
+   * @return {[Uint8Array, Uint8Array]} the salt and B values.
    */
-  async generate(srv: string): Promise<string> {
+  parseServerCredentials(srv: string): [Uint8Array, Uint8Array] {
     const v = srv.split(":");
     if (!v[0] || !v[1]) {
       throw new Error("Invalid server public key");
     }
 
     const salt = fromHex(v[0]);
+    const B = fromHex(v[1]);
 
-    const B = bigintFromBytes(fromHex(v[1]));
+    return [salt, B];
+  }
 
+  /**
+   * Generates an authenticator, given server credentials.
+   *
+   * @param {string} salt verifier salt
+   * @param {Uint8Array} B server public key
+   * @return {Promise<string>} authenticator to send to server
+   */
+  async generate(salt: Uint8Array, B: Uint8Array): Promise<string> {
+    let Bn = bigintFromBytes(B);
     const pf = this.s.pf;
-    if (B % pf.N === 0n) {
+    if (Bn % pf.N === 0n) {
       throw new Error("Invalid server public key");
     }
 
     const u = await this.s.hashInt(
-      concatBytes(pad(this.xA, pf.n), pad(B, pf.n))
+      concatBytes(pad(this.A, pf.n), pad(Bn, pf.n))
     );
     if (u === 0n) {
       throw new Error("Invalid server public key");
     }
 
-    const x = await this.s.hashInt(concatBytes(this.i, this.p, salt));
-    const t0 = modPow(pf.g, x, pf.N) * this.k;
+    const x = this.s.m === Mode.GoSRP ?
+      await this.s.hashInt(concatBytes(this.i, this.p, salt)) :
+      await this.s.hashInt(
+        concatBytes(salt, new Uint8Array(
+          await hash(this.s.h,
+            concatBytes(this.i, new Uint8Array([0x3A]), this.p)
+          )
+        ))
+      );
 
-    const t1 = B - t0;
+    const t0 = modPow(pf.g, x, pf.N) * this.k;
+    const t1 = Bn - t0;
     const t2 = this.a + u * x;
     const S = modPow(t1, t2, pf.N);
 
-    this.xK = new Uint8Array(await hash(this.s.h, bytesFromBigint(S)));
-    this.xM = new Uint8Array(
-      await hash(
-        this.s.h,
-        concatBytes(
-          this.xK,
-          bytesFromBigint(this.xA),
-          bytesFromBigint(B),
-          this.i,
-          salt,
-          bytesFromBigint(pf.N),
-          bytesFromBigint(pf.g)
+    // SHA_Interleave is not used by most SRP implementations.
+    this._K = this.s.m === Mode.RFC2945 ?
+      new Uint8Array(await hashInterleave(this.s.h, bytesFromBigint(S))) :
+      new Uint8Array(await hash(this.s.h, bytesFromBigint(S)));
+    
+    if (this.s.m === Mode.GoSRP) {
+      // Simplified construction used by Go SRP.
+      this._M = new Uint8Array(
+        await hash(
+          this.s.h,
+          concatBytes(
+            this._K,
+            bytesFromBigint(this.A),
+            bytesFromBigint(Bn),
+            this.i,
+            salt,
+            bytesFromBigint(pf.N),
+            bytesFromBigint(pf.g)
+          )
         )
-      )
-    );
+      );
+    } else {
+      this._M = new Uint8Array(
+        await hash(
+          this.s.h,
+          concatBytes(
+            xorBytes(
+              new Uint8Array(await hash(this.s.h, bytesFromBigint(pf.N))),
+              new Uint8Array(await hash(this.s.h, bytesFromBigint(pf.g))),
+            ),
+            new Uint8Array(await hash(this.s.h, this.i)),
+            salt,
+            bytesFromBigint(this.A),
+            bytesFromBigint(Bn),
+            this._K,
+          )
+        )
+      );
+    }
 
-    return toHex(this.xM);
+    return toHex(this._M);
   }
 
   /**
@@ -586,7 +378,7 @@ export class Client {
   async serverOk(proof: string): Promise<boolean> {
     const enc = new TextEncoder();
     const h = enc.encode(
-      toHex(new Uint8Array(await hash(this.s.h, concatBytes(this.xK, this.xM))))
+      toHex(new Uint8Array(await hash(this.s.h, concatBytes(this._K, this.M))))
     );
     const proofBin = enc.encode(proof);
     return constantTimeCompare(h, proofBin);
