@@ -5,12 +5,12 @@
   "main": "dist/index.node.cjs",
   "browser": "dist/index.browser.js",
   "module": "dist/index.node.mjs",
-  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "browser": "./dist/index.browser.js",
       "require": "./dist/index.node.cjs",
-      "default": "./dist/index.node.mjs"
+      "default": "./dist/index.node.mjs",
+      "types": "./dist/index.d.ts"
     }
   },
   "scripts": {
